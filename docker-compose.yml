@@ -10,6 +10,8 @@ services:
       ZOOKEEPER_TICK_TIME: 2000
     ports:
       - "2181:2181"
+    networks:
+      - hive
 
   kafka:
     container_name: kafka
@@ -27,6 +29,8 @@ services:
     ports:
       - "9092:9092"
       - "29092:29092"
+    networks:
+      - hive
 
   # Databases
   postgres:
@@ -41,11 +45,13 @@ services:
       - ./init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
     ports:
       - "5432:5432"
-    healthcheck:  # <-- Add this block
+    healthcheck:
       test: ["CMD-SHELL", "pg_isready -U retail_user -d retail_store"]
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - hive
 
   mongodb:
     image: mongo:6.0
@@ -59,6 +65,8 @@ services:
       - ./mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
     ports:
       - "27017:27017"
+    networks:
+      - hive
 
   # Hive (PostgreSQL-backed)
   hive-metastore:
@@ -78,6 +86,8 @@ services:
     entrypoint: ["/opt/hive-init.sh"]
     ports:
       - "9083:9083"
+    networks:
+      - hive
 
   hive-server:
     image: apache/hive:4.0.0
@@ -93,6 +103,8 @@ services:
     ports:
       - "10000:10000"  # JDBC
       - "10002:10002"  # Web UI
+    networks:
+      - hive
 
   # Processing
   spark:
@@ -106,6 +118,8 @@ services:
       SPARK_UI_PORT: 8085
     volumes:
       - ./spark-apps:/app
+    networks:
+      - hive
 
   spark-worker:
     image: bitnami/spark:3.5
@@ -117,9 +131,112 @@ services:
       - SPARK_MASTER_URL=spark://spark:7077
     volumes:
       - ./spark-apps:/app
+    networks:
+      - hive
+
+  # Apache Airflow
+  airflow-postgres:
+    image: postgres:13
+    container_name: airflow-postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow_postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+    networks:
+      - hive
+
+  airflow-init:
+    image: apache/airflow:2.7.2
+    container_name: airflow-init
+    depends_on:
+      - airflow-postgres
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+      AIRFLOW__CORE__FERNET_KEY: ''
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth'
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'true'
+      _AIRFLOW_DB_UPGRADE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: admin
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+    entrypoint: |
+      bash -c "
+        airflow db init &&
+        airflow users create --username admin --firstname Admin --lastname User --role Admin --email admin@example.com --password admin
+        echo 'Airflow initialization completed'
+      "
+    networks:
+      - hive
+
+  airflow-webserver:
+    image: apache/airflow:2.7.2
+    container_name: airflow-webserver
+    depends_on:
+      - airflow-init
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+      AIRFLOW__CORE__FERNET_KEY: ''
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth'
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'true'
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+    ports:
+      - "8090:8080"
+    command: webserver
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - hive
+
+  airflow-scheduler:
+    image: apache/airflow:2.7.2
+    container_name: airflow-scheduler
+    depends_on:
+      - airflow-init
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+      AIRFLOW__CORE__FERNET_KEY: ''
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth'
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - hive
 
   # Data Visualization
-
   superset:
     image: apache/superset
     container_name: superset
@@ -163,6 +280,8 @@ services:
     environment:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: localhost:9092
+    networks:
+      - hive
 
   mongo-express:
     image: mongo-express:latest
@@ -177,6 +296,8 @@ services:
       ME_CONFIG_MONGODB_URL: mongodb://retail_user:retail_pass@mongodb:27017/
       ME_CONFIG_BASICAUTH_USERNAME: admin
       ME_CONFIG_BASICAUTH_PASSWORD: admin
+    networks:
+      - hive
 
   pgadmin:
     image: dpage/pgadmin4:latest
@@ -190,6 +311,8 @@ services:
       - pgadmin_data:/var/lib/pgadmin
       - ./pgadmin_servers.json:/pgadmin4/servers.json:ro
     restart: unless-stopped
+    networks:
+      - hive
 
   # Redis
   redis:
@@ -205,92 +328,32 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-
-  # Airflow
-  airflow-scheduler:
-    image: apache/airflow:2.6.3
-    container_name: airflow-scheduler
-    restart: unless-stopped
-    depends_on:
-      - redis
-      - postgres
-    environment:
-      - AIRFLOW__CORE__EXECUTOR=CeleryExecutor
-      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://retail_user:retail_pass@postgres:5432/retail_store
-      - AIRFLOW__CELERY__RESULT_BACKEND=db+postgresql://retail_user:retail_pass@postgres:5432/retail_store
-      - AIRFLOW__CELERY__BROKER_URL=redis://redis:6379/0
-      - AIRFLOW__CORE__FERNET_KEY=46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLbfzqDDho=
-      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=true
-      - AIRFLOW__CORE__LOAD_EXAMPLES=false
-      - AIRFLOW__API__AUTH_BACKEND=airflow.api.auth.backend.basic_auth
-    volumes:
-      - ./airflow/dags:/opt/airflow/dags
-      - ./airflow/logs:/opt/airflow/logs
-      - ./airflow/plugins:/opt/airflow/plugins
-    user: "${AIRFLOW_UID:-50000}:0"
-    healthcheck:
-      test: ["CMD-SHELL", "[ -f /opt/airflow/airflow-webserver.pid ]"]
-      interval: 30s
-      timeout: 30s
-      retries: 3
-
-  airflow-webserver:
-    image: apache/airflow:2.6.3
-    container_name: airflow-webserver
-    restart: unless-stopped
-    depends_on:
-      - airflow-scheduler
-    environment:
-      - AIRFLOW__CORE__EXECUTOR=CeleryExecutor
-      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://retail_user:retail_pass@postgres:5432/retail_store
-      - AIRFLOW__CELERY__RESULT_BACKEND=db+postgresql://retail_user:retail_pass@postgres:5432/retail_store
-      - AIRFLOW__CELERY__BROKER_URL=redis://redis:6379/0
-    ports:
-      - "8082:8080"
-    volumes:
-      - ./airflow/dags:/opt/airflow/dags
-      - ./airflow/logs:/opt/airflow/logs
-      - ./airflow/plugins:/opt/airflow/plugins
-    user: "${AIRFLOW_UID:-50000}:0"
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 30s
-      retries: 5
-
-  airflow-worker:
-    image: apache/airflow:2.6.3
-    container_name: airflow-worker
-    restart: unless-stopped
-    depends_on:
-      - airflow-scheduler
-    environment:
-      - AIRFLOW__CORE__EXECUTOR=CeleryExecutor
-      - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://retail_user:retail_pass@postgres:5432/retail_store
-      - AIRFLOW__CELERY__RESULT_BACKEND=db+postgresql://retail_user:retail_pass@postgres:5432/retail_store
-      - AIRFLOW__CELERY__BROKER_URL=redis://redis:6379/0
-    volumes:
-      - ./airflow/dags:/opt/airflow/dags
-      - ./airflow/logs:/opt/airflow/logs
-      - ./airflow/plugins:/opt/airflow/plugins
-    user: "${AIRFLOW_UID:-50000}:0"
+    networks:
+      - hive
 
   # RStudio (R Mage)
   rstudio:
-    image: rocker/rstudio:4.3.1
+    image: rocker/rstudio
     container_name: rstudio
     ports:
-      - "8787:8787"
-    environment:
-      - PASSWORD=retail_pass
-      - USER=retail_user
-      - ROOT=TRUE
-    volumes:
-      - ./rstudio:/home/rstudio
-      - ./r_libs:/usr/local/lib/R/site-library
+      - 8787:8787
     depends_on:
       - postgres
       - mongodb
+    volumes:
+      - rstudio-data:/home/rstudio
+    working_dir: /home/rstudio
+    entrypoint:
+      - /usr/lib/rstudio-server/bin/rserver
+    command:
+      - --server-daemonize=0
+      - --server-app-armor-enabled=0
+    environment:
+      - USER=rstudio
+      - PASSWORD=rstudio
+      - ROOT=true
+    networks:
+      - hive
 
 volumes:
   postgres_data:
@@ -298,11 +361,10 @@ volumes:
   hive_data:
   superset_data:
   pgadmin_data:
-  #added
   redis_data:
-  airflow_logs:
+  rstudio-data:
   r_libs:
-
+  airflow_postgres_data:
 
 networks:
   hive:
