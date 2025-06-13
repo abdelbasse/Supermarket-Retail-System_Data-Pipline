@@ -1,0 +1,15 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "Retail Store Database",
+      "Group": "Retail Analytics Project",
+      "Host": "postgres",
+      "Port": 5432,
+      "MaintenanceDB": "retail_store",
+      "Username": "retail_user",
+      "Password": "retail_pass",
+      "SSLMode": "prefer",
+      "Comment": "PostgreSQL database for retail analytics project - Created: 2025-06-11 12:01:29 UTC by hichamdiouane - Fixed email format for admin access"
+    }
+  }
+}

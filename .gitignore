@@ -1,0 +1,10 @@
+# Virtual environment
+.venv/
+
+# Database files
+*.db
+
+# AI model files
+*.h5
+*.pt
+*.pkl
